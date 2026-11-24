@@ -4,8 +4,8 @@ Daemon will be stopped at the end of the build
 > Task :app:preDebugBuild UP-TO-DATE
 > Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
 > Task :app:checkKotlinGradlePluginConfigurationErrors
-> Task :app:checkDebugAarMetadata
 > Task :app:generateDebugResValues
+> Task :app:checkDebugAarMetadata
 > Task :app:mapDebugSourceSetPaths
 > Task :app:generateDebugResources
 > Task :app:packageDebugResources
@@ -15,9 +15,9 @@ Daemon will be stopped at the end of the build
 > Task :app:mergeDebugResources
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
-> Task :app:processDebugManifestForPackage
 > Task :app:javaPreCompileDebug
 > Task :app:mergeDebugShaders
+> Task :app:processDebugManifestForPackage
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets
@@ -26,8 +26,8 @@ Daemon will be stopped at the end of the build
 > Task :app:mergeDebugStartupProfile
 > Task :app:mergeDebugJniLibFolders
 > Task :app:checkDebugDuplicateClasses
-> Task :app:mergeDebugNativeLibs
 > Task :app:processDebugResources
+> Task :app:mergeDebugNativeLibs
 > Task :app:mergeLibDexDebug
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
@@ -47,7 +47,7 @@ Unable to strip the following libraries, packaging them as they are: libmlkit_go
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795548842236.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795550542054.json
 
-BUILD SUCCESSFUL in 40s
+BUILD SUCCESSFUL in 36s
 37 actionable tasks: 37 executed
