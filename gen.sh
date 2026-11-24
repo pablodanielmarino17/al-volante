@@ -36,8 +36,8 @@ android {
         applicationId = "com.pablo.alvolante"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     signingConfigs {
@@ -201,6 +201,7 @@ class DidiReaderService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         val p = Parser.parse(lines)
+        if (lines.any { Parser.minRx.containsMatchIn(it) }) Store.saveSnap(this, lines, p != null)
         if (p != null) {
             lastSeenReq = now
             val sig = p.price.toString() + "|" + p.tKm + "|" + (p.destAddr ?: "")
@@ -634,7 +635,8 @@ class MainActivity : Activity() {
         val pk = synchronized(DidiReaderService.seenPkgs) { DidiReaderService.seenPkgs.joinToString("\n") }
         val ll = DidiReaderService.lastLines
         val txt = "Apps que vi:\n" + (if (pk.isEmpty()) "(ninguna todavía)" else pk) +
-            "\n\nÚltimo texto leído de DiDi:\n" + (if (ll.isEmpty()) "(nada todavía)" else ll.joinToString("\n"))
+            "\n\nÚltimo texto leído de DiDi:\n" + (if (ll.isEmpty()) "(nada todavía)" else ll.joinToString("\n")) +
+            "\n\nÚltimas pantallas de DiDi con minutos:\n" + Store.snapsTexto(this)
         val t = TextView(this)
         t.text = txt
         t.setTextIsSelectable(true)
@@ -702,11 +704,12 @@ object Fmt {
 internal class Seg(val min: Int, val km: Double, val idx: Int)
 
 object Parser {
-    private val segRx = Regex("(\\d+)\\s*min\\s*\\(\\s*([\\d.,]+)\\s*(km|m)\\s*\\)", RegexOption.IGNORE_CASE)
+    private val segRx = Regex("(\\d+)\\s*min\\.?\\s*\\(?\\s*([\\d.,]+)\\s*(km|m)\\b\\s*\\)?", RegexOption.IGNORE_CASE)
     private val priceLine = Regex("^\\$\\s*([\\d.]+(?:,\\d{1,2})?)$")
     private val priceAny = Regex("\\$\\s*([\\d.]+(?:,\\d{1,2})?)")
     private val multRx = Regex("(\\d+[.,]\\d+)\\s*x\\b")
     private val decDot = Regex("\\.\\d{1,2}$")
+    val minRx = Regex("\\d+\\s*min", RegexOption.IGNORE_CASE)
 
     fun money(s: String): Double? = s.replace(".", "").replace(",", ".").toDoubleOrNull()
 
@@ -721,25 +724,30 @@ object Parser {
         return b
     }
 
-    fun isAddress(l: String): Boolean = l.contains(",") && barrioOf(l) != null
+    fun isAddress(l: String): Boolean {
+        if (barrioOf(l) == null) return false
+        val u = l.uppercase()
+        return l.contains(",") || u.contains("CABA") || u.contains("BUENOS AIRES")
+    }
 
     fun parse(raw: List<String>): Pedido? {
         val lines = raw.map { clean(it) }.filter { it.isNotEmpty() }
+        val joined = lines.joinToString("  ")
         val segs = ArrayList<Seg>()
-        for (i in lines.indices) {
-            for (m in segRx.findAll(lines[i])) {
-                val mins = m.groupValues[1].toIntOrNull() ?: continue
-                val s = m.groupValues[2]
-                val unit = m.groupValues[3].lowercase()
-                val norm = when {
-                    s.contains(",") -> s.replace(".", "").replace(",", ".")
-                    unit == "km" && decDot.containsMatchIn(s) -> s
-                    else -> s.replace(".", "")
-                }
-                var d = norm.toDoubleOrNull() ?: continue
-                if (unit == "m") d /= 1000.0
-                segs.add(Seg(mins, d, i))
+        var firstSeg = -1
+        for (m in segRx.findAll(joined)) {
+            val mins = m.groupValues[1].toIntOrNull() ?: continue
+            val s = m.groupValues[2]
+            val unit = m.groupValues[3].lowercase()
+            val norm = when {
+                s.contains(",") -> s.replace(".", "").replace(",", ".")
+                unit == "km" && decDot.containsMatchIn(s) -> s
+                else -> s.replace(".", "")
             }
+            var d = norm.toDoubleOrNull() ?: continue
+            if (unit == "m") d /= 1000.0
+            if (firstSeg < 0) firstSeg = m.range.first
+            segs.add(Seg(mins, d, m.range.first))
         }
         if (segs.size < 2) return null
 
@@ -750,7 +758,9 @@ object Parser {
             if (price != null) break
         }
         if (price == null) {
-            price = lines.flatMap { l -> priceAny.findAll(l).mapNotNull { money(it.groupValues[1]) }.toList() }.maxOrNull()
+            val area = if (firstSeg > 0) joined.substring(0, firstSeg) else joined
+            price = priceAny.findAll(area).mapNotNull { money(it.groupValues[1]) }.maxOrNull()
+                ?: priceAny.findAll(joined).mapNotNull { money(it.groupValues[1]) }.maxOrNull()
         }
         val pr = price ?: return null
         if (pr < 100) return null
@@ -763,12 +773,9 @@ object Parser {
 
         val p = segs[0]
         val t = segs[1]
-        fun addrNear(from: Int, stop: Int): String? {
-            for (j in from until minOf(lines.size, stop)) if (isAddress(lines[j])) return lines[j]
-            return null
-        }
-        val oA = addrNear(p.idx, maxOf(t.idx, p.idx + 1))
-        val dA = addrNear(t.idx, t.idx + 5)
+        val addrs = lines.filter { isAddress(it) }
+        val oA = addrs.getOrNull(0)
+        val dA = addrs.getOrNull(1)
         return Pedido(pr, mult, p.min, p.km, t.min, t.km, oA?.let { barrioOf(it) }, dA?.let { barrioOf(it) }, oA, dA)
     }
 }
@@ -1050,6 +1057,32 @@ object Store {
     }
 
     fun clearZonas(c: Context) { file(c, "zonas.json").delete() }
+
+    // ---------- pantallas guardadas (para ajustar la lectura) ----------
+    @Synchronized fun saveSnap(c: Context, lines: List<String>, ok: Boolean) {
+        val a = arr(c, "pantallas.json")
+        val h = lines.joinToString("|").hashCode()
+        if (a.length() > 0 && a.getJSONObject(a.length() - 1).optInt("h") == h) return
+        val t = JSONArray()
+        for (l in lines.take(150)) t.put(l)
+        a.put(JSONObject().put("ts", System.currentTimeMillis()).put("h", h).put("ok", ok).put("t", t))
+        val out = JSONArray()
+        for (i in maxOf(0, a.length() - 8) until a.length()) out.put(a.get(i))
+        save(c, "pantallas.json", out.toString())
+    }
+
+    fun snapsTexto(c: Context): String {
+        val a = arr(c, "pantallas.json")
+        if (a.length() == 0) return "(ninguna todavía)"
+        val sb = StringBuilder()
+        for (i in a.length() - 1 downTo 0) {
+            val o = a.getJSONObject(i)
+            sb.append("--- ").append(hm(o.getLong("ts"))).append(if (o.optBoolean("ok")) " (pedido reconocido)" else " (no reconocido)").append(" ---\n")
+            val t = o.getJSONArray("t")
+            for (j in 0 until t.length()) sb.append(t.getString(j)).append("\n")
+        }
+        return sb.toString()
+    }
 
     // ---------- pedidos ----------
     private fun fin(v: Double): Double = if (v.isNaN() || v.isInfinite()) 0.0 else v
