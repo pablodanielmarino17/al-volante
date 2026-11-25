@@ -25,6 +25,8 @@ def ckan_resources(base, ids, query):
         try:
             d = json.loads(get(base + "/api/3/action/package_search?rows=5&q=" + urllib.parse.quote(query)))
             for p in d.get("result", {}).get("results", []):
+                if "registro-nacional" not in (p.get("name") or "") and p.get("name") != "barrios-populares":
+                    continue
                 log("encontrado por busqueda", base, p.get("name"))
                 res += p.get("resources", [])
         except Exception as e:
@@ -143,7 +145,7 @@ try:
 except Exception as e:
     log("Ciudad error", repr(e)[:160])
 try:
-    res = ckan_resources("https://datos.gob.ar", ["habitat-registro-nacional-barrios-populares"], "registro nacional barrios populares")
+    res = ckan_resources("https://datos.gob.ar", ["registro-nacional-de-barrios-populares", "habitat-registro-nacional-barrios-populares"], "registro nacional barrios populares")
     g = geojson_de(res)
     if not g:
         res = ckan_resources("https://datosabiertos.desarrollosocial.gob.ar", ["registro-nacional-de-barrios-populares"], "barrios populares")
