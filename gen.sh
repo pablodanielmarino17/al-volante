@@ -2287,4 +2287,6 @@ cat > 'proj/app/src/main/res/xml/accessibility_config.xml' <<'EOF_ALVOLANTE'
     android:notificationTimeout="250"
     android:description="@string/a11y_desc" />
 EOF_ALVOLANTE
+# Zonas peligrosas: poligonos oficiales de barrios populares (Ciudad y Provincia de Buenos Aires)
+timeout 300 python3 zonas.py || echo 'No se pudieron bajar las zonas'
 echo "Proyecto generado"
