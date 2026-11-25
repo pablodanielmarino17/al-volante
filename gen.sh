@@ -36,8 +36,8 @@ android {
         applicationId = "com.pablo.alvolante"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     signingConfigs {
@@ -93,12 +93,15 @@ package com.pablo.alvolante
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -115,6 +118,7 @@ class DidiReaderService : AccessibilityService() {
     companion object {
         @Volatile var instance: DidiReaderService? = null
         @Volatile var lastLines: List<String> = emptyList()
+        @Volatile var lastOcrLines: List<String> = emptyList()
         val seenPkgs = LinkedHashSet<String>()
     }
 
@@ -125,13 +129,16 @@ class DidiReaderService : AccessibilityService() {
     private var currentSig: String? = null
     private var pending: Pedido? = null
     private var pendingTs = 0L
+    private var lastOcr = 0L
+    private var ocrBusy = false
+    private var didiVisible = false
 
     private val scanR = Runnable { scheduled = false; scan() }
     private val tick = object : Runnable {
         override fun run() {
             if (currentSig != null) {
                 if (System.currentTimeMillis() - lastSeenReq > 1200) scan()
-                if (currentSig != null && System.currentTimeMillis() - lastSeenReq > 3000) {
+                if (currentSig != null && System.currentTimeMillis() - lastSeenReq > 4500) {
                     overlay?.hide()
                     currentSig = null
                 }
@@ -183,41 +190,49 @@ class DidiReaderService : AccessibilityService() {
 
     fun scan() {
         val lines = ArrayList<String>()
+        var visible = false
         try {
             for (w in windows) {
                 val r = w.root ?: continue
-                if (isDidi(r.packageName?.toString() ?: "")) collect(r, lines, 0)
+                if (isDidi(r.packageName?.toString() ?: "")) { visible = true; collect(r, lines, 0) }
             }
         } catch (e: Exception) { }
-        if (lines.isEmpty()) {
+        if (!visible) {
             try {
                 val r = rootInActiveWindow
-                if (r != null && isDidi(r.packageName?.toString() ?: "")) collect(r, lines, 0)
+                if (r != null && isDidi(r.packageName?.toString() ?: "")) { visible = true; collect(r, lines, 0) }
             } catch (e: Exception) { }
         }
-        if (lines.isEmpty()) return
-        lastLines = lines
+        didiVisible = visible
+        if (!visible) return
+        if (lines.isNotEmpty()) lastLines = lines
         if (Store.getB(this, "aprender", false)) Store.learnLines(this, lines)
 
         val now = System.currentTimeMillis()
         val p = Parser.parse(lines)
         if (lines.any { Parser.minRx.containsMatchIn(it) }) Store.saveSnap(this, lines, p != null)
-        if (p != null) {
-            lastSeenReq = now
-            val sig = p.price.toString() + "|" + p.tKm + "|" + (p.destAddr ?: "")
-            if (sig != currentSig) {
-                currentSig = sig
-                val ev = Evaluator.eval(this, p)
-                overlay?.show(ev, p)
-                Store.logPedido(this, p, ev)
-                pending = p
-                pendingTs = now
-            }
-            return
+        if (p != null) { handlePedido(p, now); return }
+        maybeOcr()
+        checkAccepted(lines, now)
+    }
+
+    private fun handlePedido(p: Pedido, now: Long) {
+        lastSeenReq = now
+        val sig = p.price.toString() + "|" + p.tKm + "|" + p.pKm
+        if (sig != currentSig) {
+            currentSig = sig
+            val ev = Evaluator.eval(this, p)
+            overlay?.show(ev, p)
+            Store.logPedido(this, p, ev)
+            pending = p
+            pendingTs = now
         }
-        // ¿Lo tomó? Si después del pedido aparece la dirección de búsqueda en otra pantalla de DiDi.
+    }
+
+    private fun checkAccepted(lines: List<String>, now: Long) {
         val pd = pending ?: return
         if (now - pendingTs > 180000) { pending = null; return }
+        if (now - lastSeenReq < 2000) return
         val street = (pd.originAddr ?: pd.destAddr)?.substringBefore(",")?.trim()
         if (street != null && street.length >= 5 && lines.any { it.contains(street) }) {
             Store.addTrip(this, pd)
@@ -226,9 +241,53 @@ class DidiReaderService : AccessibilityService() {
         }
     }
 
+    /** Si DiDi no deja leer la tarjeta como texto, saca una foto de la pantalla y la lee. */
+    private fun maybeOcr() {
+        if (Build.VERSION.SDK_INT < 30) return
+        if (!Store.getB(this, "ocr", true)) return
+        val now = System.currentTimeMillis()
+        if (ocrBusy || now - lastOcr < 1800) return
+        ocrBusy = true
+        lastOcr = now
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(r: AccessibilityService.ScreenshotResult) {
+                    var bmp: Bitmap? = null
+                    try {
+                        val hb = r.hardwareBuffer
+                        bmp = Bitmap.wrapHardwareBuffer(hb, r.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                        hb.close()
+                    } catch (e: Exception) { }
+                    val b = bmp
+                    if (b == null) { ocrBusy = false; return }
+                    val top = (b.height * 0.35).toInt()
+                    val crop = Bitmap.createBitmap(b, 0, top, b.width, b.height - top)
+                    Ocr.readBitmap(crop) { txt ->
+                        ocrBusy = false
+                        if (txt != null) onOcrText(txt.split("\n"))
+                    }
+                }
+                override fun onFailure(code: Int) { ocrBusy = false }
+            })
+        } catch (e: Exception) {
+            ocrBusy = false
+        }
+    }
+
+    private fun onOcrText(raw: List<String>) {
+        val own = listOf("por km ·", "min en total", "Destino:", "Combustible del viaje", "Rechazo libre", "Búsqueda lejana")
+        val lines = raw.map { it.trim() }.filter { l -> l.isNotEmpty() && own.none { l.contains(it) } }
+        val p = Parser.parse(lines)
+        if (lines.any { Parser.minRx.containsMatchIn(it) }) {
+            lastOcrLines = lines
+            Store.saveSnap(this, listOf("[leído con foto]") + lines, p != null)
+        }
+        if (p != null) handlePedido(p, System.currentTimeMillis())
+    }
+
     fun test() {
         val p = Pedido(9900.0, "1,2", 3, 0.316, 29, 8.1, "Balvanera", "Puerto Madero",
-            "Tucumán 3231, CABA - Balvanera", "Violeta Parra 1677, CABA - Puerto Madero")
+            "Tucumán 3231, CABA - Balvanera", "Violeta Parra 1677, CABA - Puerto Madero", false)
         overlay?.show(Evaluator.eval(this, p), p)
         h.postDelayed({ if (currentSig == null) overlay?.hide() }, 8000)
     }
@@ -244,6 +303,8 @@ class Overlay(private val ctx: Context) {
 
     fun show(e: Eval, p: Pedido) {
         hide()
+        val big = e.level == 4
+        val k = if (big) 1.2f else 1f
         val box = LinearLayout(ctx)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(18.0), dp(12.0), dp(18.0), dp(14.0))
@@ -253,31 +314,50 @@ class Overlay(private val ctx: Context) {
         box.background = bg
         box.elevation = dp(8.0).toFloat()
 
+        val top = LinearLayout(ctx)
+        top.orientation = LinearLayout.HORIZONTAL
+        top.gravity = Gravity.CENTER_VERTICAL
+        val t1 = TextView(ctx)
+        t1.text = e.label + " · " + Fmt.money(p.price)
+        t1.textSize = 20f * k
+        t1.typeface = Typeface.DEFAULT_BOLD
+        t1.setTextColor(e.textColor)
+        top.addView(t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val t2 = TextView(ctx)
+        t2.text = Fmt.pct(e.pct)
+        t2.textSize = 34f * k
+        t2.typeface = Typeface.DEFAULT_BOLD
+        t2.setTextColor(e.textColor)
+        t2.setPadding(dp(14.0), 0, 0, 0)
+        top.addView(t2)
+        box.addView(top)
+
         fun line(t: String, size: Float, bold: Boolean) {
             if (t.isEmpty()) return
             val tv = TextView(ctx)
             tv.text = t
-            tv.textSize = size
+            tv.textSize = size * k
             tv.setTextColor(e.textColor)
             if (bold) tv.typeface = Typeface.DEFAULT_BOLD
             box.addView(tv)
         }
-        line(e.label + " · " + Fmt.money(p.price) + (if (p.mult != null) "  ⚡" + p.mult + "x" else ""), 26f, true)
-        line(Fmt.money(e.perKm) + " por km · " + Fmt.money(e.perHour) + " por hora", 18f, true)
-        line(Fmt.num(p.pKm + p.tKm, 1) + " km y " + (p.pMin + p.tMin) + " min en total (" + p.pMin + " min para buscarlo)", 15f, false)
-        line(e.zona, 15f, false)
+        line(Fmt.money(e.perKm) + " por km · " + Fmt.money(e.perHour) + " por hora", 17f, true)
+        line(Fmt.num(p.pKm + p.tKm, 1) + " km y " + (p.pMin + p.tMin) + " min en total (" + p.pMin + " min para buscarlo)", 14f, false)
+        line(e.zona, 14f, false)
+        line(e.extras, 14f, true)
         val f = e.fuel
-        if (f != null) line("Combustible del viaje: " + Fmt.money(f) + " · te quedan " + Fmt.money(p.price - f), 15f, false)
+        if (f != null) line("Combustible del viaje: " + Fmt.money(f) + " · te quedan " + Fmt.money(p.price - f), 14f, false)
 
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        lp.y = dp(Store.getD(ctx, "overlay_y", 90.0))
+        lp.y = dp(Store.getD(ctx, "overlay_y", 70.0))
+        lp.horizontalMargin = 0.03f
         try { wm.addView(box, lp); view = box } catch (ex: Exception) { }
         h.removeCallbacks(hideR)
         h.postDelayed(hideR, 40000)
@@ -291,10 +371,22 @@ class Overlay(private val ctx: Context) {
 }
 
 object Ocr {
+    private val client by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+
     fun read(c: Context, uri: Uri, cb: (String?) -> Unit) {
         try {
             val img = InputImage.fromFilePath(c, uri)
-            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(img)
+            client.process(img)
+                .addOnSuccessListener { cb(it.text) }
+                .addOnFailureListener { cb(null) }
+        } catch (e: Exception) {
+            cb(null)
+        }
+    }
+
+    fun readBitmap(b: Bitmap, cb: (String?) -> Unit) {
+        try {
+            client.process(InputImage.fromBitmap(b, 0))
                 .addOnSuccessListener { cb(it.text) }
                 .addOnFailureListener { cb(null) }
         } catch (e: Exception) {
@@ -329,7 +421,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
@@ -337,6 +431,8 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -347,31 +443,34 @@ import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
+    private lateinit var sv: ScrollView
     private lateinit var root: LinearLayout
+    private var screen = "home"
     private var camUri: Uri? = null
     private var camFin = false
-    private lateinit var tvEstado: TextView
-    private lateinit var tvTablero: TextView
-    private lateinit var tvConsumo: TextView
-    private lateinit var tvCargas: TextView
-    private lateinit var tvZonas: TextView
-    private lateinit var tvPedidos: TextView
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     private fun toast(s: String) { Toast.makeText(this, s, Toast.LENGTH_LONG).show() }
+
+    // colores de los botones (fondo, título, subtítulo)
+    private val VERDE = intArrayOf(Color.rgb(0xEA, 0xF3, 0xDE), Color.rgb(0x27, 0x50, 0x0A), Color.rgb(0x3B, 0x6D, 0x11))
+    private val AZUL = intArrayOf(Color.rgb(0xE6, 0xF1, 0xFB), Color.rgb(0x0C, 0x44, 0x7C), Color.rgb(0x18, 0x5F, 0xA5))
+    private val AMBAR = intArrayOf(Color.rgb(0xFA, 0xEE, 0xDA), Color.rgb(0x63, 0x38, 0x06), Color.rgb(0x85, 0x4F, 0x0B))
+    private val GRIS = intArrayOf(Color.rgb(0xF1, 0xEF, 0xE8), Color.rgb(0x44, 0x44, 0x41), Color.rgb(0x5F, 0x5E, 0x5A))
+    private val NEUTRO = Color.argb(0x1A, 0x88, 0x87, 0x80)
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         val saved = b?.getString("camUri")
         if (saved != null) camUri = Uri.parse(saved)
         camFin = b?.getBoolean("camFin") ?: false
-        val sv = ScrollView(this)
+        screen = b?.getString("screen") ?: "home"
+        sv = ScrollView(this)
         root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(dp(18), dp(18), dp(18), dp(48))
+        root.setPadding(dp(18), dp(20), dp(18), dp(48))
         sv.addView(root)
         setContentView(sv)
-        build()
     }
 
     override fun onSaveInstanceState(o: Bundle) {
@@ -379,35 +478,110 @@ class MainActivity : Activity() {
         val u = camUri
         if (u != null) o.putString("camUri", u.toString())
         o.putBoolean("camFin", camFin)
+        o.putString("screen", screen)
     }
 
     override fun onResume() {
         super.onResume()
-        refresh()
+        show(screen)
     }
 
-    // ---------- piezas de pantalla ----------
-    private fun tv(t: String, size: Float, bold: Boolean, top: Int): TextView {
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (screen != "home") show("home") else super.onBackPressed()
+    }
+
+    private fun show(s: String) {
+        screen = s
+        root.removeAllViews()
+        when (s) {
+            "vara" -> vara()
+            "jornada" -> jornada()
+            "comb" -> comb()
+            "conf" -> conf()
+            else -> home()
+        }
+        sv.scrollTo(0, 0)
+    }
+
+    // ---------- piezas ----------
+    private fun round(c: Int, r: Int): GradientDrawable {
+        val g = GradientDrawable()
+        g.setColor(c)
+        g.cornerRadius = dp(r).toFloat()
+        return g
+    }
+
+    private fun tv(parent: LinearLayout, t: String, size: Float, bold: Boolean, color: Int? = null, top: Int = 4): TextView {
         val v = TextView(this)
         v.text = t
         v.textSize = size
         if (bold) v.setTypeface(v.typeface, Typeface.BOLD)
-        v.setPadding(0, dp(top), 0, dp(4))
-        root.addView(v)
+        if (color != null) v.setTextColor(color)
+        v.setPadding(0, dp(top), 0, dp(2))
+        parent.addView(v)
         return v
     }
-    private fun h1(t: String) = tv(t, 30f, true, 0)
-    private fun h2(t: String) = tv(t, 22f, true, 26)
-    private fun p(t: String = "") = tv(t, 16f, false, 4)
+    private fun h1(t: String) = tv(root, t, 28f, true, null, 0)
+    private fun h2(t: String) = tv(root, t, 20f, true, null, 22)
+    private fun p(t: String) = tv(root, t, 15f, false)
+
+    private fun row(): LinearLayout {
+        val r = LinearLayout(this)
+        r.orientation = LinearLayout.HORIZONTAL
+        root.addView(r)
+        return r
+    }
+
+    private fun tile(parent: LinearLayout, icon: String, title: String, sub: String, c: IntArray, onClick: (() -> Unit)?) {
+        val t = LinearLayout(this)
+        t.orientation = LinearLayout.VERTICAL
+        t.setPadding(dp(14), dp(14), dp(14), dp(14))
+        t.background = round(c[0], 18)
+        t.minimumHeight = dp(118)
+        val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        lp.setMargins(dp(5), dp(5), dp(5), dp(5))
+        t.layoutParams = lp
+        tv(t, icon, 26f, false, c[1], 0)
+        tv(t, title, 17f, true, c[1], 6)
+        tv(t, sub, 13f, false, c[2], 2)
+        if (onClick != null) {
+            t.isClickable = true
+            t.setOnClickListener { onClick() }
+        }
+        parent.addView(t)
+    }
+
+    private fun metric(parent: LinearLayout, label: String, value: String) {
+        val t = LinearLayout(this)
+        t.orientation = LinearLayout.VERTICAL
+        t.setPadding(dp(12), dp(10), dp(12), dp(10))
+        t.background = round(NEUTRO, 12)
+        val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        lp.setMargins(dp(5), dp(5), dp(5), dp(5))
+        t.layoutParams = lp
+        tv(t, label, 13f, false, null, 0).alpha = 0.7f
+        tv(t, value, 22f, true, null, 2)
+        parent.addView(t)
+    }
 
     private fun btn(t: String, f: () -> Unit): Button {
         val b = Button(this)
         b.text = t
         b.isAllCaps = false
-        b.textSize = 17f
+        b.textSize = 16f
         b.setOnClickListener { f() }
         root.addView(b)
         return b
+    }
+
+    private fun back() {
+        val b = TextView(this)
+        b.text = "←  Inicio"
+        b.textSize = 16f
+        b.setPadding(0, dp(4), 0, dp(10))
+        b.setOnClickListener { show("home") }
+        root.addView(b)
     }
 
     private fun numEdit(label: String, decimal: Boolean = true): EditText {
@@ -423,62 +597,176 @@ class MainActivity : Activity() {
         val e = numEdit(label, decimal)
         e.setText(Store.getS(this, key, def))
         e.addTextChangedListener(object : TextWatcher {
-            override fun afterTextChanged(s: Editable?) { Store.setS(this@MainActivity, key, s?.toString() ?: ""); refreshLight() }
+            override fun afterTextChanged(s: Editable?) { Store.setS(this@MainActivity, key, s?.toString() ?: "") }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
         return e
     }
 
+    private fun sw(text: String, key: String, def: Boolean) {
+        val s = Switch(this)
+        s.text = text
+        s.textSize = 16f
+        s.setPadding(0, dp(8), 0, dp(8))
+        s.isChecked = Store.getB(this, key, def)
+        s.setOnCheckedChangeListener { _, on -> Store.setB(this, key, on) }
+        root.addView(s)
+    }
+
     private fun num(e: EditText): Double? = e.text.toString().replace(",", ".").trim().toDoubleOrNull()
 
-    // ---------- pantalla ----------
-    private fun build() {
-        h1("Al volante")
-        tvEstado = p()
-        btn("Activar lectura de DiDi") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        p("Si Android no te deja activarla: tocá \"Abrir info de la app\", después los tres puntitos de arriba a la derecha y \"Permitir ajustes restringidos\". Después volvé a activarla.")
-        btn("Abrir info de la app") {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + packageName)))
-        }
-        btn("Probar el semáforo") {
-            val s = DidiReaderService.instance
-            if (s == null) toast("Primero activá la lectura de DiDi.") else { s.test(); toast("Mirá arriba de la pantalla.") }
-        }
+    private fun isServiceOn(): Boolean {
+        val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        return s.contains(packageName + "/")
+    }
 
-        h2("Tu vara")
-        p("El semáforo compara cada pedido con lo que querés ganar. Cuenta el viaje completo: lo que tardás y recorrés para buscarlo más el viaje.")
+    // ---------- inicio ----------
+    private fun home() {
+        val head = row()
+        head.gravity = Gravity.CENTER_VERTICAL
+        val title = tv(head, "Al volante", 28f, true, null, 0)
+        title.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        val on = isServiceOn()
+        val chip = TextView(this)
+        chip.text = if (on) "● Lectura activa" else "● Lectura apagada"
+        chip.textSize = 13f
+        chip.setTextColor(if (on) VERDE[1] else Color.rgb(0x79, 0x1F, 0x1F))
+        chip.background = round(if (on) VERDE[0] else Color.rgb(0xFC, 0xEB, 0xEB), 10)
+        chip.setPadding(dp(10), dp(5), dp(10), dp(5))
+        chip.setOnClickListener { show("conf") }
+        head.addView(chip)
+
+        val m = row()
+        m.setPadding(0, dp(10), 0, 0)
+        val km = Store.kmHoy(this)
+        metric(m, "Hoy", if (km != null) Fmt.int(km) + " km" else "—")
+        val ck = Store.costoKm(this)
+        metric(m, "Combustible por km", if (ck != null) Fmt.money(ck) else "—")
+
+        val r1 = row()
+        r1.setPadding(0, dp(6), 0, 0)
+        tile(r1, "🎯", "Tu vara", Fmt.money(Store.getD(this, "obj_km", 1000.0)) + " km · " + Fmt.money(Store.getD(this, "obj_h", 15000.0)) + " h", VERDE) { show("vara") }
+        tile(r1, "⏱", "Jornada", Store.tableroCorto(this), AZUL) { show("jornada") }
+        val r2 = row()
+        val k = Store.consumo(this).kml
+        tile(r2, "⛽", "Combustible", if (k != null) Fmt.num(k, 1) + " km por litro" else "Cargá tus datos", AMBAR) { show("comb") }
+        tile(r2, "⚙", "Configuración", "Lectura, permisos", GRIS) { show("conf") }
+
+        h2("Últimos pedidos")
+        val list = Store.ultimosPedidos(this, 3)
+        if (list.isEmpty()) p("Todavía no leí pedidos.")
+        for (o in list) {
+            val r = row()
+            r.gravity = Gravity.CENTER_VERTICAL
+            r.setPadding(0, dp(6), 0, dp(6))
+            val lv = o.optInt("lv", if (o.optString("v") == "Justo") 1 else if (o.optString("v") == "No conviene") 0 else 2)
+            val dot = TextView(this)
+            dot.text = "●  "
+            dot.textSize = 18f
+            dot.setTextColor(Evaluator.NIVEL_DOT[lv.coerceIn(0, 4)])
+            r.addView(dot)
+            val orig = o.optString("o").ifEmpty { "?" }
+            val dest = o.optString("d").ifEmpty { "?" }
+            val txt = TextView(this)
+            txt.text = Store.hora(o.getLong("ts")) + " · " + orig + " → " + dest + (if (o.optBoolean("acc")) " · tomado" else "")
+            txt.textSize = 15f
+            r.addView(txt, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val pc = TextView(this)
+            pc.text = if (o.has("pct")) Fmt.pct(o.getInt("pct")) else ""
+            pc.textSize = 16f
+            pc.setTypeface(pc.typeface, Typeface.BOLD)
+            r.addView(pc)
+        }
+    }
+
+    // ---------- tu vara ----------
+    private fun vara() {
+        back()
+        h1("Tu vara")
+        p("El semáforo compara cada pedido con lo que querés ganar, contando también lo que tardás y recorrés para buscar al pasajero.")
         field("Querés ganar por km (\$)", "obj_km", "1000")
         field("Querés ganar por hora (\$)", "obj_h", "15000")
-        field("Cuánto pesa la zona de destino (%)", "zona_peso", "15")
+        h2("Niveles de verde")
+        field("Muy bueno desde (% sobre tu meta)", "muy_bueno", "25")
+        field("Excelente desde (% sobre tu meta)", "excelente", "50")
         field("Amarillo desde (% de tu meta)", "amarillo", "85")
-        field("Altura de la burbuja desde arriba", "overlay_y", "90", false)
+        h2("Zona de destino")
+        field("Cuánto pesa la zona (%)", "zona_peso", "15")
+        p("Si el destino es un barrio donde solés andar suma verde; si es una zona rara para vos, resta.")
+    }
 
-        h2("Tablero")
-        p("Sacale una foto al tablero al empezar y al terminar. Leo el kilometraje solo; vos solo confirmás.")
-        tvTablero = p()
-        btn("Foto del tablero al empezar") { foto(false) }
-        btn("Foto del tablero al terminar") { foto(true) }
+    // ---------- jornada ----------
+    private fun jornada() {
+        back()
+        h1("Jornada de hoy")
+        p("Foto del tablero al empezar y al terminar. Leo el kilometraje solo; vos confirmás.")
+        val d = Store.tableroResumen(this).split("\n")
+        val r = row()
+        r.setPadding(0, dp(8), 0, 0)
+        tile(r, "🌅", "Al empezar", d.getOrNull(1)?.substringAfter(": ") ?: "", AZUL) { foto(false) }
+        tile(r, "🌙", "Al terminar", d.getOrNull(2)?.substringAfter(": ") ?: "", if (Store.tableroCorto(this).contains("fin pendiente")) AZUL else GRIS) { foto(true) }
+        val km = Store.kmHoy(this)
+        if (km != null) {
+            val m = row()
+            metric(m, "Hiciste hoy", Fmt.int(km) + " km")
+        }
+    }
 
-        h2("Combustible")
-        p("Cada vez que cargás, poné dos de estos tres datos y calculo el tercero.")
+    // ---------- combustible ----------
+    private fun comb() {
+        back()
+        h1("Combustible")
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(16), dp(14), dp(16), dp(14))
+        box.background = round(AMBAR[0], 16)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(8), 0, dp(8))
+        box.layoutParams = lp
+        val c = Store.consumo(this)
+        val kml = c.kml
+        tv(box, if (c.real) "Consumo real" else "Consumo", 13f, false, AMBAR[2], 0)
+        tv(box, if (kml != null) Fmt.num(kml, 1) + " km por litro" else "Faltan datos", 24f, true, AMBAR[1], 2)
+        val ck = Store.costoKm(this)
+        tv(box, if (ck != null) Fmt.money(ck) + " de combustible por km" else "Necesito fotos del tablero y una carga", 13f, false, AMBAR[2], 2)
+        root.addView(box)
+
+        h2("Nueva carga")
+        p("Poné dos de los tres datos y calculo el tercero.")
         val eImp = numEdit("Importe pagado (\$)")
         val eLit = numEdit("Litros cargados")
         val ePre = numEdit("Precio por litro (\$)")
         btn("Guardar carga") { guardarCarga(eImp, eLit, ePre) }
-        tvCargas = p()
-        tvConsumo = p()
-        field("Capacidad del tanque en litros (opcional, mejora la cuenta)", "tanque", "")
+        p(Store.cargasResumen(this))
+        h2("Ajustes")
+        field("Capacidad del tanque en litros (opcional)", "tanque", "")
         field("Consumo mientras junto datos (km por litro)", "kml_manual", "")
+    }
+
+    // ---------- configuración ----------
+    private fun conf() {
+        back()
+        h1("Configuración")
+        h2("Lectura de DiDi")
+        p(if (isServiceOn()) "Activa. Cuando entre un pedido aparece el semáforo arriba de la pantalla." else "Apagada. Activala para ver el semáforo.")
+        btn("Activar lectura de DiDi") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        btn("Probar el semáforo") {
+            val s = DidiReaderService.instance
+            if (s == null) toast("Primero activá la lectura de DiDi.") else { s.test(); toast("Mirá arriba de la pantalla.") }
+        }
+        sw("Leer la tarjeta con foto cuando DiDi no deja leer el texto", "ocr", true)
+        field("Altura de la burbuja desde arriba", "overlay_y", "70", false)
+
+        h2("Permisos")
+        p("Si Android no te deja activar la lectura: tocá \"Abrir info de la app\", los tres puntitos de arriba y \"Permitir ajustes restringidos\".")
+        btn("Abrir info de la app") {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + packageName)))
+        }
 
         h2("Tus zonas")
-        p("Con tus viajes anteriores el semáforo suma verde si el destino es una zona donde solés andar y resta si es una zona rara para vos. Para enseñarme: prendé \"Modo aprender\", abrí el historial de viajes en DiDi y bajá despacio. Apagalo cuando termines. También podés elegir capturas del historial.")
-        val sw = Switch(this)
-        sw.text = "Modo aprender"
-        sw.textSize = 18f
-        sw.isChecked = Store.getB(this, "aprender", false)
-        sw.setOnCheckedChangeListener { _, on -> Store.setB(this, "aprender", on); refresh() }
-        root.addView(sw)
+        p("Prendé \"Modo aprender\", abrí el historial de viajes en DiDi y bajá despacio. Apagalo cuando termines.")
+        sw("Modo aprender", "aprender", false)
         btn("Leer capturas del historial") {
             val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
             i.addCategory(Intent.CATEGORY_OPENABLE)
@@ -486,39 +774,18 @@ class MainActivity : Activity() {
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             startActivityForResult(i, 3)
         }
-        tvZonas = p()
+        p(Store.zonasResumen(this))
         btn("Borrar zonas aprendidas") {
             AlertDialog.Builder(this).setMessage("¿Borrar todas las zonas aprendidas?")
-                .setPositiveButton("Borrar") { _, _ -> Store.clearZonas(this); refresh() }
+                .setPositiveButton("Borrar") { _, _ -> Store.clearZonas(this); show("conf") }
                 .setNegativeButton("Cancelar", null).show()
         }
 
-        h2("Últimos pedidos")
-        tvPedidos = p()
+        h2("Diagnóstico")
         btn("Ver lo que leo de DiDi") { verLeido() }
     }
 
-    private fun isServiceOn(): Boolean {
-        val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
-        return s.contains(packageName + "/")
-    }
-
-    private fun refreshLight() {
-        if (::tvConsumo.isInitialized) tvConsumo.text = Store.consumoResumen(this)
-    }
-
-    private fun refresh() {
-        if (!::tvEstado.isInitialized) return
-        tvEstado.text = if (isServiceOn()) "Lectura de DiDi: ACTIVA. Cuando entre un pedido aparece el semáforo arriba de la pantalla."
-        else "Lectura de DiDi: APAGADA. Activala para ver el semáforo."
-        tvTablero.text = Store.tableroResumen(this)
-        tvCargas.text = Store.cargasResumen(this)
-        tvConsumo.text = Store.consumoResumen(this)
-        tvZonas.text = (if (Store.getB(this, "aprender", false)) "Modo aprender PRENDIDO: abrí el historial en DiDi y bajá.\n\n" else "") + Store.zonasResumen(this)
-        tvPedidos.text = Store.pedidosResumen(this)
-    }
-
-    // ---------- combustible ----------
+    // ---------- acciones ----------
     private fun guardarCarga(eImp: EditText, eLit: EditText, ePre: EditText) {
         var imp = num(eImp)
         var lit = num(eLit)
@@ -528,12 +795,10 @@ class MainActivity : Activity() {
         if (pre == null && imp != null && lit != null && lit > 0) pre = imp / lit
         if (imp == null || lit == null || pre == null || imp <= 0 || lit <= 0) { toast("Completá dos de los tres datos."); return }
         Store.addCarga(this, imp, lit, pre)
-        eImp.setText(""); eLit.setText(""); ePre.setText("")
         toast("Carga guardada: " + Fmt.num(lit, 1) + " litros a " + Fmt.money(pre) + " el litro.")
-        refresh()
+        show("comb")
     }
 
-    // ---------- tablero ----------
     private fun foto(fin: Boolean) {
         camFin = fin
         try {
@@ -606,21 +871,20 @@ class MainActivity : Activity() {
             .setView(box)
             .setPositiveButton("Guardar") { _, _ ->
                 Store.setTablero(this, Store.today(), if (fin) "fin" else "ini", e.text.toString().trim().toLongOrNull(), if (nivel[0] >= 0) nivel[0] else null)
-                refresh()
+                show(screen)
                 toast("Tablero guardado.")
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    // ---------- historial ----------
     private fun leerCapturas(uris: List<Uri>) {
         toast("Leyendo " + uris.size + " capturas…")
         val total = intArrayOf(0)
         fun next(i: Int) {
             if (i >= uris.size) {
                 toast("Listo: sumé " + total[0] + " paradas nuevas a tus zonas.")
-                refresh()
+                show(screen)
                 return
             }
             Ocr.read(this, uris[i]) { txt ->
@@ -641,9 +905,9 @@ class MainActivity : Activity() {
         t.text = txt
         t.setTextIsSelectable(true)
         t.setPadding(dp(22), dp(10), dp(22), dp(10))
-        val sv = ScrollView(this)
-        sv.addView(t)
-        AlertDialog.Builder(this).setTitle("Lo que leo").setView(sv)
+        val s = ScrollView(this)
+        s.addView(t)
+        AlertDialog.Builder(this).setTitle("Lo que leo").setView(s)
             .setPositiveButton("Copiar") { _, _ ->
                 val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("al-volante", txt))
@@ -672,17 +936,21 @@ data class Pedido(
     val origin: String?,
     val dest: String?,
     val originAddr: String?,
-    val destAddr: String?
+    val destAddr: String?,
+    val rechazoLibre: Boolean = false
 )
 
 data class Eval(
     val perKm: Double,
     val perHour: Double,
     val score: Double,
+    val pct: Int,
+    val level: Int,
     val color: Int,
     val textColor: Int,
     val label: String,
     val zona: String,
+    val extras: String,
     val fuel: Double?
 )
 
@@ -699,13 +967,14 @@ object Fmt {
         f.minimumFractionDigits = 0
         return f.format(v)
     }
+    fun pct(p: Int): String = if (p >= 0) "+" + p + "%" else "−" + (-p) + "%"
 }
 
 internal class Seg(val min: Int, val km: Double, val idx: Int)
 
 object Parser {
     private val segRx = Regex("(\\d+)\\s*min\\.?\\s*\\(?\\s*([\\d.,]+)\\s*(km|m)\\b\\s*\\)?", RegexOption.IGNORE_CASE)
-    private val priceLine = Regex("^\\$\\s*([\\d.]+(?:,\\d{1,2})?)$")
+    private val priceLine = Regex("^[\\$S]\\s*(\\d{1,3}(?:\\.\\d{3})+|\\d+)(?:,\\d{1,2})?$")
     private val priceAny = Regex("\\$\\s*([\\d.]+(?:,\\d{1,2})?)")
     private val multRx = Regex("(\\d+[.,]\\d+)\\s*x\\b")
     private val decDot = Regex("\\.\\d{1,2}$")
@@ -770,20 +1039,41 @@ object Parser {
             val m = multRx.find(l)
             if (m != null) { mult = m.groupValues[1]; break }
         }
+        val libre = lines.any { it.contains("rechazo permitido", ignoreCase = true) }
 
         val p = segs[0]
         val t = segs[1]
         val addrs = lines.filter { isAddress(it) }
         val oA = addrs.getOrNull(0)
         val dA = addrs.getOrNull(1)
-        return Pedido(pr, mult, p.min, p.km, t.min, t.km, oA?.let { barrioOf(it) }, dA?.let { barrioOf(it) }, oA, dA)
+        return Pedido(pr, mult, p.min, p.km, t.min, t.km, oA?.let { barrioOf(it) }, dA?.let { barrioOf(it) }, oA, dA, libre)
     }
 }
 
 object Evaluator {
-    val VERDE: Int = Color.rgb(0x1F, 0x9D, 0x55)
-    val AMARILLO: Int = Color.rgb(0xF2, 0xC2, 0x00)
-    val ROJO: Int = Color.rgb(0xE0, 0x39, 0x2B)
+    // fondo, texto
+    val NIVEL_BG = intArrayOf(
+        Color.rgb(0xA3, 0x2D, 0x2D), // 0 no conviene
+        Color.rgb(0xFA, 0xC7, 0x75), // 1 justo
+        Color.rgb(0x63, 0x99, 0x22), // 2 conviene
+        Color.rgb(0x3B, 0x6D, 0x11), // 3 muy bueno
+        Color.rgb(0x17, 0x34, 0x04)  // 4 excelente
+    )
+    val NIVEL_FG = intArrayOf(
+        Color.rgb(0xFC, 0xEB, 0xEB),
+        Color.rgb(0x41, 0x24, 0x02),
+        Color.rgb(0x17, 0x34, 0x04),
+        Color.rgb(0xEA, 0xF3, 0xDE),
+        Color.rgb(0xEA, 0xF3, 0xDE)
+    )
+    val NIVEL_DOT = intArrayOf(
+        Color.rgb(0xE2, 0x4B, 0x4A),
+        Color.rgb(0xBA, 0x75, 0x17),
+        Color.rgb(0x63, 0x99, 0x22),
+        Color.rgb(0x3B, 0x6D, 0x11),
+        Color.rgb(0x27, 0x50, 0x0A)
+    )
+    val NIVEL_TXT = arrayOf("No conviene", "Justo", "Conviene", "★ Muy bueno", "★★ Excelente")
 
     fun eval(c: Context, p: Pedido): Eval {
         val km = (p.pKm + p.tKm).coerceAtLeast(0.1)
@@ -813,14 +1103,25 @@ object Evaluator {
             zona = "Destino: " + p.dest + " · " + tipo
         }
         val am = Store.getD(c, "amarillo", 85.0) / 100.0
-        val color: Int
-        val textColor: Int
-        val label: String
-        if (score >= 1.0) { color = VERDE; textColor = Color.WHITE; label = "Conviene" }
-        else if (score >= am) { color = AMARILLO; textColor = Color.BLACK; label = "Justo" }
-        else { color = ROJO; textColor = Color.WHITE; label = "No conviene" }
+        val mb = 1.0 + Store.getD(c, "muy_bueno", 25.0) / 100.0
+        val ex = 1.0 + Store.getD(c, "excelente", 50.0) / 100.0
+        val level = when {
+            score >= ex -> 4
+            score >= mb -> 3
+            score >= 1.0 -> 2
+            score >= am -> 1
+            else -> 0
+        }
+        val pct = Math.round((score - 1.0) * 100).toInt()
+
+        val ex2 = ArrayList<String>()
+        if (p.mult != null) ex2.add("⚡" + p.mult + "x")
+        if (p.rechazoLibre && level <= 1) ex2.add("Rechazo libre")
+        if (p.pMin > 10 || (p.tKm > 0 && p.pKm > 0.4 * p.tKm)) ex2.add("Búsqueda lejana")
+
         val ck = Store.costoKm(c)
-        return Eval(perKm, perHour, score, color, textColor, label, zona, if (ck != null) ck * km else null)
+        return Eval(perKm, perHour, score, pct, level, NIVEL_BG[level], NIVEL_FG[level], NIVEL_TXT[level],
+            zona, ex2.joinToString(" · "), if (ck != null) ck * km else null)
     }
 }
 EOF_ALVOLANTE
@@ -1094,6 +1395,7 @@ object Store {
                 .put("km", fin(p.pKm + p.tKm)).put("min", p.pMin + p.tMin)
                 .put("o", p.origin ?: "").put("d", p.dest ?: "").put("v", e.label)
                 .put("pkm", fin(e.perKm)).put("ph", fin(e.perHour)).put("acc", false)
+                .put("pct", e.pct).put("lv", e.level)
         )
         val out = JSONArray()
         for (i in maxOf(0, a.length() - 300) until a.length()) out.put(a.get(i))
@@ -1105,6 +1407,33 @@ object Store {
         if (a.length() == 0) return
         a.getJSONObject(a.length() - 1).put("acc", true)
         save(c, "pedidos.json", a.toString())
+    }
+
+    fun ultimosPedidos(c: Context, n: Int): List<JSONObject> {
+        val a = arr(c, "pedidos.json")
+        val out = ArrayList<JSONObject>()
+        for (i in a.length() - 1 downTo maxOf(0, a.length() - n)) out.add(a.getJSONObject(i))
+        return out
+    }
+
+    fun hora(ts: Long): String = hm(ts)
+
+    /** Texto corto de la jornada de hoy para el botón del inicio. */
+    fun tableroCorto(c: Context): String {
+        val d = obj(c, "tablero.json").optJSONObject(today()) ?: return "Sin fotos hoy"
+        val ini = d.optJSONObject("ini")
+        val fin = d.optJSONObject("fin")
+        if (ini == null) return "Falta la foto de inicio"
+        if (fin == null) return "Inicio " + hm(ini.getLong("ts")) + " · fin pendiente"
+        return hm(ini.getLong("ts")) + " a " + hm(fin.getLong("ts"))
+    }
+
+    fun kmHoy(c: Context): Long? {
+        val d = obj(c, "tablero.json").optJSONObject(today()) ?: return null
+        val ini = d.optJSONObject("ini") ?: return null
+        val fin = d.optJSONObject("fin") ?: return null
+        if (!ini.has("km") || !fin.has("km")) return null
+        return fin.getLong("km") - ini.getLong("km")
     }
 
     fun pedidosResumen(c: Context): String {
@@ -1154,6 +1483,7 @@ cat > 'proj/app/src/main/res/xml/accessibility_config.xml' <<'EOF_ALVOLANTE'
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="250"
     android:description="@string/a11y_desc" />
 EOF_ALVOLANTE
