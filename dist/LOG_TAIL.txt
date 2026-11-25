@@ -18,6 +18,7 @@ Daemon will be stopped at the end of the build
 > Task :app:javaPreCompileDebug
 > Task :app:mergeDebugShaders
 > Task :app:compileDebugShaders NO-SOURCE
+> Task :app:processDebugManifestForPackage
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets
 > Task :app:desugarDebugFileDependencies
@@ -25,8 +26,8 @@ Daemon will be stopped at the end of the build
 > Task :app:mergeDebugStartupProfile
 > Task :app:mergeDebugJniLibFolders
 > Task :app:checkDebugDuplicateClasses
-> Task :app:processDebugManifestForPackage
 > Task :app:mergeDebugNativeLibs
+> Task :app:processDebugResources
 > Task :app:mergeLibDexDebug
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
@@ -35,7 +36,6 @@ Daemon will be stopped at the end of the build
 > Task :app:stripDebugDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libmlkit_google_ocr_pipeline.so.
 
-> Task :app:processDebugResources
 > Task :app:mergeExtDexDebug
 
 > Task :app:compileDebugKotlin
@@ -50,7 +50,7 @@ w: file:///home/runner/work/al-volante/al-volante/proj/app/src/main/java/com/pab
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795622493934.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795622976446.json
 
-BUILD SUCCESSFUL in 32s
+BUILD SUCCESSFUL in 42s
 37 actionable tasks: 37 executed

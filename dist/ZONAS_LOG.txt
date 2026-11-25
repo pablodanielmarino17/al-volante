@@ -1,0 +1,13 @@
+paquete https://data.buenosaires.gob.ar barrios-populares 9 recursos
+geojson https://cdn.buenosaires.gob.ar/datosabiertos/datasets/ministerio-de-desarrollo-humano-y-habitat/barrios-populares/barrios_populares_manzanas.geojson 468 features
+Ciudad: 506 poligonos
+falla package_show https://datos.gob.ar habitat-registro-nacional-barrios-populares <HTTPError 404: 'Not Found'>
+encontrado por busqueda https://datos.gob.ar registro-nacional-de-barrios-populares
+encontrado por busqueda https://datos.gob.ar factores-de-riesgo-en-barrios-populares-del-gran-buenos-aires
+encontrado por busqueda https://datos.gob.ar asentamientos-humanos-sistemas-de-ciudades-e-infraestructuras-urbanizacion-y-ruralidad
+encontrado por busqueda https://datos.gob.ar analisis-de-distribucion-espacial-de-los-dispositivos-de-la-red-sedronar-20231
+encontrado por busqueda https://datos.gob.ar sistema-sociodemografico-grupos-poblacionales-e-inequidades
+geojson https://infra.datos.gob.ar/catalog/sedronar/dataset/4/distribution/4.30/download/cant_disp_dentro_barriopop_depto.geojson 51 features
+Provincia (RENABAP): 0 poligonos
+Total: 506 poligonos
+Tamano: 162807 bytes
