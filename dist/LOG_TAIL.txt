@@ -22,16 +22,16 @@ Daemon will be stopped at the end of the build
 > Task :app:mergeDebugAssets
 > Task :app:desugarDebugFileDependencies
 > Task :app:compressDebugAssets
+> Task :app:mergeDebugStartupProfile
 > Task :app:processDebugManifestForPackage
 > Task :app:checkDebugDuplicateClasses
-> Task :app:mergeDebugStartupProfile
 > Task :app:mergeDebugJniLibFolders
 > Task :app:mergeLibDexDebug
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
 > Task :app:writeDebugSigningConfigVersions
-> Task :app:processDebugResources
 > Task :app:mergeDebugNativeLibs
+> Task :app:processDebugResources
 
 > Task :app:stripDebugDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libmlkit_google_ocr_pipeline.so.
@@ -50,7 +50,7 @@ w: file:///home/runner/work/al-volante/al-volante/proj/app/src/main/java/com/pab
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795603007665.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795603840227.json
 
-BUILD SUCCESSFUL in 26s
+BUILD SUCCESSFUL in 30s
 37 actionable tasks: 37 executed
