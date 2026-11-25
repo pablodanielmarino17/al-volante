@@ -974,7 +974,7 @@ internal class Seg(val min: Int, val km: Double, val idx: Int)
 
 object Parser {
     private val segRx = Regex("(\\d+)\\s*min\\.?\\s*\\(?\\s*([\\d.,]+)\\s*(km|m)\\b\\s*\\)?", RegexOption.IGNORE_CASE)
-    private val priceLine = Regex("^[\\$S]\\s*(\\d{1,3}(?:\\.\\d{3})+|\\d+)(?:,\\d{1,2})?$")
+    private val priceLine = Regex("^[\\\$S]\\s*(\\d{1,3}(?:\\.\\d{3})+|\\d+)(?:,\\d{1,2})?$")
     private val priceAny = Regex("\\$\\s*([\\d.]+(?:,\\d{1,2})?)")
     private val multRx = Regex("(\\d+[.,]\\d+)\\s*x\\b")
     private val decDot = Regex("\\.\\d{1,2}$")
