@@ -36,8 +36,8 @@ android {
         applicationId = "com.pablo.alvolante"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     signingConfigs {
@@ -979,6 +979,8 @@ object Parser {
     private val multRx = Regex("(\\d+[.,]\\d+)\\s*x\\b")
     private val decDot = Regex("\\.\\d{1,2}$")
     val minRx = Regex("\\d+\\s*min", RegexOption.IGNORE_CASE)
+    private val aceptarRx = Regex("Aceptar\\s*[\\\$S]\\s*(\\d{1,3}(?:\\.\\d{3})+|\\d+)", RegexOption.IGNORE_CASE)
+    private val cpRx = Regex("\\bC(1\\d{3})(?:[A-Z]{3})?\\b")
 
     fun money(s: String): Double? = s.replace(".", "").replace(",", ".").toDoubleOrNull()
 
@@ -993,8 +995,16 @@ object Parser {
         return b
     }
 
+    /** Barrio si DiDi lo da ("... - Balvanera"); si no, el código postal ("CP 1424"). */
+    fun zonaOf(line: String): String? {
+        val b = barrioOf(line)
+        if (b != null) return b
+        val m = cpRx.find(line) ?: return null
+        return "CP " + m.groupValues[1]
+    }
+
     fun isAddress(l: String): Boolean {
-        if (barrioOf(l) == null) return false
+        if (zonaOf(l) == null) return false
         val u = l.uppercase()
         return l.contains(",") || u.contains("CABA") || u.contains("BUENOS AIRES")
     }
@@ -1020,14 +1030,17 @@ object Parser {
         }
         if (segs.size < 2) return null
 
-        var price: Double? = null
-        for (l in lines) {
-            val m = priceLine.find(l) ?: continue
-            price = money(m.groupValues[1])
-            if (price != null) break
+        // Poné Tu Precio: vale el precio del botón "Aceptar", no las contraofertas
+        var price: Double? = aceptarRx.find(joined)?.let { money(it.groupValues[1]) }
+        val area = if (firstSeg > 0) joined.substring(0, firstSeg) else joined
+        if (price == null) {
+            for (l in area.split("  ")) {
+                val m = priceLine.find(l.trim()) ?: continue
+                price = money(m.groupValues[1])
+                if (price != null) break
+            }
         }
         if (price == null) {
-            val area = if (firstSeg > 0) joined.substring(0, firstSeg) else joined
             price = priceAny.findAll(area).mapNotNull { money(it.groupValues[1]) }.maxOrNull()
                 ?: priceAny.findAll(joined).mapNotNull { money(it.groupValues[1]) }.maxOrNull()
         }
@@ -1046,7 +1059,7 @@ object Parser {
         val addrs = lines.filter { isAddress(it) }
         val oA = addrs.getOrNull(0)
         val dA = addrs.getOrNull(1)
-        return Pedido(pr, mult, p.min, p.km, t.min, t.km, oA?.let { barrioOf(it) }, dA?.let { barrioOf(it) }, oA, dA, libre)
+        return Pedido(pr, mult, p.min, p.km, t.min, t.km, oA?.let { zonaOf(it) }, dA?.let { zonaOf(it) }, oA, dA, libre)
     }
 }
 
@@ -1297,7 +1310,7 @@ object Store {
         for (raw in lines) {
             val l = Parser.clean(raw)
             if (!Parser.isAddress(l)) continue
-            val barrio = Parser.barrioOf(l) ?: continue
+            val barrio = Parser.zonaOf(l) ?: continue
             val sig = key(l)
             if (s.has(sig)) continue
             s.put(sig, 1)
