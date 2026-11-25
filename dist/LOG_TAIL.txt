@@ -23,23 +23,23 @@ Daemon will be stopped at the end of the build
 > Task :app:desugarDebugFileDependencies
 > Task :app:compressDebugAssets
 > Task :app:mergeDebugStartupProfile
-> Task :app:processDebugManifestForPackage
-> Task :app:checkDebugDuplicateClasses
 > Task :app:mergeDebugJniLibFolders
+> Task :app:checkDebugDuplicateClasses
+> Task :app:processDebugManifestForPackage
+> Task :app:mergeDebugNativeLibs
 > Task :app:mergeLibDexDebug
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
 > Task :app:writeDebugSigningConfigVersions
-> Task :app:mergeDebugNativeLibs
-> Task :app:processDebugResources
 
 > Task :app:stripDebugDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libmlkit_google_ocr_pipeline.so.
 
+> Task :app:processDebugResources
 > Task :app:mergeExtDexDebug
 
 > Task :app:compileDebugKotlin
-w: file:///home/runner/work/al-volante/al-volante/proj/app/src/main/java/com/pablo/alvolante/MainActivity.kt:76:55 'onBackPressed(): Unit' is deprecated. Deprecated in Java
+w: file:///home/runner/work/al-volante/al-volante/proj/app/src/main/java/com/pablo/alvolante/MainActivity.kt:83:55 'onBackPressed(): Unit' is deprecated. Deprecated in Java
 
 > Task :app:compileDebugJavaWithJavac NO-SOURCE
 > Task :app:dexBuilderDebug
@@ -50,7 +50,7 @@ w: file:///home/runner/work/al-volante/al-volante/proj/app/src/main/java/com/pab
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795603840227.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_3-1795622493934.json
 
-BUILD SUCCESSFUL in 30s
+BUILD SUCCESSFUL in 32s
 37 actionable tasks: 37 executed
